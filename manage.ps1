@@ -5,6 +5,7 @@ $StateDir = if ($env:STATE_DIR) { $env:STATE_DIR } else { Join-Path $env:Program
 $NodesFile = Join-Path $StateDir "nodes.json"
 $JoinWindowsScript = Join-Path $ProjectDir "scripts\tailscale-onekey-join-windows.ps1"
 $JoinUnixScript = Join-Path $ProjectDir "scripts\tailscale-onekey-join-linux.sh"
+$SharedAuthKeyFile = Join-Path $StateDir "auth.key"
 
 function Assert-Admin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -54,8 +55,8 @@ function Assert-Port([string]$Value) {
 }
 
 function Assert-Platform([string]$Platform) {
-    if ($Platform -notin @("windows", "linux", "debian", "ubuntu", "alpine", "macos")) {
-        throw "平台必须是 windows、linux、debian、ubuntu、alpine 或 macos。"
+    if ($Platform -notin @("auto", "windows", "linux", "debian", "ubuntu", "alpine", "macos")) {
+        throw "平台必须是 auto、windows、linux、debian、ubuntu、alpine 或 macos。"
     }
 }
 
@@ -70,32 +71,55 @@ function Get-Node([string]$Id) {
     return $node
 }
 
+function ConvertFrom-SshTarget([string]$Target) {
+    $user = "root"
+    $endpoint = $Target
+    if ($Target.Contains("@")) {
+        $parts = $Target.Split("@", 2)
+        $user = $parts[0]
+        $endpoint = $parts[1]
+    }
+    $hostName = $endpoint
+    $port = 22
+    if ($endpoint -match '^([^:]+):([0-9]+)$') {
+        $hostName = $Matches[1]
+        $port = [int]$Matches[2]
+    }
+    Assert-SshTarget $hostName $user
+    Assert-Port ([string]$port)
+    return [pscustomobject]@{ User = $user; Host = $hostName; Port = $port }
+}
+
+function Get-SharedAuthKey {
+    Initialize-State
+    if ($env:TS_AUTHKEY) { return $env:TS_AUTHKEY }
+    if (Test-Path $SharedAuthKeyFile) {
+        Write-Host "正在使用已保存的 Tailscale auth key。" -ForegroundColor DarkGray
+        return (Get-Content $SharedAuthKeyFile -Raw).Trim()
+    }
+    $authKey = Read-Secret "Tailscale auth key（后续节点自动复用）"
+    if ([string]::IsNullOrWhiteSpace($authKey)) { throw "auth key 不能为空。" }
+    $authKey | Set-Content -Path $SharedAuthKeyFile -Encoding ASCII -NoNewline
+    return $authKey
+}
+
 function Add-Node {
-    $id = Read-Default "节点 ID"
+    $target = ConvertFrom-SshTarget (Read-Default "SSH 地址，例如 root@1.2.3.4 或 user@host:2222")
+    $defaultId = ($target.Host -replace '[^A-Za-z0-9_-]', '-').Trim('-')
+    $id = Read-Default "节点名称" $(if ($defaultId) { $defaultId } else { "node" })
     if ($id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "节点 ID 格式无效。" }
     if (Get-Nodes | Where-Object { $_.Id -eq $id }) { throw "节点已存在: $id" }
-    $platform = Read-Default "平台 (windows/linux/debian/ubuntu/alpine/macos)" "windows"
-    Assert-Platform $platform
-    $sshHost = Read-Default "SSH 地址或 IP"
-    $sshUser = Read-Default "SSH 用户" $(if ($platform -eq "windows") { $env:USERNAME } else { "root" })
-    Assert-SshTarget $sshHost $sshUser
-    $sshPort = Read-Default "SSH 端口" "22"
-    Assert-Port $sshPort
-    $hostname = Read-Default "Tailscale hostname" $id
-    $authKey = Read-Secret "Tailscale auth key"
-    if ([string]::IsNullOrWhiteSpace($authKey)) { throw "auth key 不能为空。" }
-    $extraArgs = Read-Default "额外 tailscale up 参数"
-    $useSudo = if ($platform -eq "windows" -or $sshUser -eq "root") { $false } else { (Read-Default "使用免密码 sudo (yes/no)" "yes") -eq "yes" }
+    $authKey = Get-SharedAuthKey
 
     $nodes = @(Get-Nodes)
     $nodes += [pscustomobject]@{
-        Id = $id; Platform = $platform; SshHost = $sshHost; SshUser = $sshUser
-        SshPort = [int]$sshPort; Hostname = $hostname; AuthKey = $authKey
-        ExtraArgs = $extraArgs; UseSudo = $useSudo
+        Id = $id; Platform = "auto"; SshHost = $target.Host; SshUser = $target.User
+        SshPort = $target.Port; Hostname = $id; AuthKey = $authKey
+        ExtraArgs = ""; UseSudo = "auto"
     }
     Save-Nodes $nodes
-    Write-Host "子节点 $id 已保存。" -ForegroundColor Green
-    if ((Read-Default "立即部署 (yes/no)" "yes") -eq "yes") { Deploy-Node $id }
+    Write-Host "子节点 $id 已保存，开始自动识别系统并部署。" -ForegroundColor Green
+    Deploy-Node $id
 }
 
 function List-Nodes {
@@ -127,7 +151,9 @@ function Edit-Node([string]$Id) {
     $node.Hostname = Read-Default "Tailscale hostname" $node.Hostname
     $extra = Read-Default "额外参数，输入 - 清空" $node.ExtraArgs
     $node.ExtraArgs = if ($extra -eq "-") { "" } else { $extra }
-    $node.UseSudo = (Read-Default "使用免密码 sudo (yes/no)" $(if ($node.UseSudo) { "yes" } else { "no" })) -eq "yes"
+    $sudoDefault = if ($node.UseSudo -is [bool]) { if ($node.UseSudo) { "yes" } else { "no" } } else { [string]$node.UseSudo }
+    $node.UseSudo = Read-Default "使用 sudo (auto/yes/no)" $sudoDefault
+    if ($node.UseSudo -notin @("auto", "yes", "no")) { throw "sudo 模式必须是 auto、yes 或 no。" }
     if ((Read-Default "替换 auth key (yes/no)" "no") -eq "yes") { $node.AuthKey = Read-Secret "新 auth key" }
     Save-Nodes $nodes
     Write-Host "子节点 $Id 已更新。" -ForegroundColor Green
@@ -161,8 +187,26 @@ function Invoke-SshPayload($Node, [string]$RemoteCommand, [string[]]$Lines) {
     if ($process.ExitCode -ne 0) { throw "SSH deployment failed with exit code $($process.ExitCode)." }
 }
 
+function Get-RemotePlatform($Node) {
+    $ssh = Get-Command ssh.exe -ErrorAction SilentlyContinue
+    if (-not $ssh) { throw "未找到 OpenSSH Client，请在 Windows 可选功能中安装。" }
+    $target = "$($Node.SshUser)@$($Node.SshHost)"
+    $output = & $ssh.Source -p $Node.SshPort $target "uname -s" 2>$null
+    if ($LASTEXITCODE -eq 255) { throw "无法连接到 $target`:$($Node.SshPort)。" }
+    if ($LASTEXITCODE -eq 0 -and "$output" -match "Darwin") { return "macos" }
+    if ($LASTEXITCODE -eq 0 -and "$output" -match "Linux") { return "linux" }
+    return "windows"
+}
+
 function Deploy-Node([string]$Id) {
     $node = Get-Node $Id
+    if (-not $node.Platform -or $node.Platform -eq "auto") {
+        $node.Platform = Get-RemotePlatform $node
+        $nodes = @(Get-Nodes)
+        ($nodes | Where-Object { $_.Id -eq $Id } | Select-Object -First 1).Platform = $node.Platform
+        Save-Nodes $nodes
+        Write-Host "自动识别平台: $($node.Platform)" -ForegroundColor DarkGray
+    }
     $target = "$($node.SshUser)@$($node.SshHost)"
     Write-Host "正在部署 $($node.Platform) 节点 $Id 到 $target..." -ForegroundColor Cyan
 
@@ -176,8 +220,12 @@ function Deploy-Node([string]$Id) {
         Invoke-SshPayload $node "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command -" $payload
     }
     else {
-        $remote = if ($node.UseSudo) { "sudo -n sh -c 'IFS= read -r TS_AUTHKEY; IFS= read -r TS_HOSTNAME; IFS= read -r TS_EXTRA_ARGS; export TS_AUTHKEY TS_HOSTNAME TS_EXTRA_ARGS; sh'" }
-            else { "sh -c 'IFS= read -r TS_AUTHKEY; IFS= read -r TS_HOSTNAME; IFS= read -r TS_EXTRA_ARGS; export TS_AUTHKEY TS_HOSTNAME TS_EXTRA_ARGS; sh'" }
+        $sudoMode = if ($node.UseSudo -is [bool]) { if ($node.UseSudo) { "yes" } else { "no" } } else { [string]$node.UseSudo }
+        $remote = switch ($sudoMode) {
+            "yes" { "sudo -n sh -c 'IFS= read -r TS_AUTHKEY; IFS= read -r TS_HOSTNAME; IFS= read -r TS_EXTRA_ARGS; export TS_AUTHKEY TS_HOSTNAME TS_EXTRA_ARGS; sh'" }
+            "no" { "sh -c 'IFS= read -r TS_AUTHKEY; IFS= read -r TS_HOSTNAME; IFS= read -r TS_EXTRA_ARGS; export TS_AUTHKEY TS_HOSTNAME TS_EXTRA_ARGS; sh'" }
+            default { 'sh -c ''IFS= read -r TS_AUTHKEY; IFS= read -r TS_HOSTNAME; IFS= read -r TS_EXTRA_ARGS; if [ "$(id -u)" -eq 0 ]; then export TS_AUTHKEY TS_HOSTNAME TS_EXTRA_ARGS; sh; else sudo -n env TS_AUTHKEY="$TS_AUTHKEY" TS_HOSTNAME="$TS_HOSTNAME" TS_EXTRA_ARGS="$TS_EXTRA_ARGS" sh; fi''' }
+        }
         $payload = @($node.AuthKey, $node.Hostname, $node.ExtraArgs) + @((Get-Content $JoinUnixScript | Select-Object -Skip 1))
         Invoke-SshPayload $node $remote $payload
     }
@@ -282,7 +330,7 @@ function Show-Menu {
         Write-Host " 2. 管理主 DERP 服务"
         Write-Host " 3. 安装 Tailscale 并让当前设备加入网络"
         Write-Host "-------------------------------------------------------"
-        Write-Host " 4. 添加子节点配置"
+        Write-Host " 4. 快速添加并部署子节点"
         Write-Host " 5. 查看子节点列表"
         Write-Host " 6. 查看子节点配置"
         Write-Host " 7. 修改子节点配置"

@@ -53,6 +53,9 @@ manager node edit edge-1 --ssh-port 2200 --hostname edge-renamed --extra-args ''
 
 cat >"${MOCK_BIN}/ssh" <<'EOF'
 #!/bin/sh
+case "$*" in
+  *'uname -s'*) printf 'Linux\n'; exit 0 ;;
+esac
 printf 'ssh' >"${SSH_LOG}"
 printf ' <%s>' "$@" >>"${SSH_LOG}"
 printf '\n' >>"${SSH_LOG}"
@@ -82,5 +85,14 @@ grep -F 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command -' "${SSH_LO
 grep -F "\$env:TS_AUTHKEY=" "${SSH_INPUT}" >/dev/null || fail "Windows auth preamble missing"
 grep -F "\$ErrorActionPreference = \"Stop\"" "${SSH_INPUT}" >/dev/null || fail "Windows join script was not streamed"
 manager node delete win-1 --yes >/dev/null
+
+: >"${SSH_LOG}"
+: >"${SSH_INPUT}"
+SSH_LOG="${SSH_LOG}" SSH_INPUT="${SSH_INPUT}" STATE_DIR="${STATE_DIR}" TS_AUTHKEY=tskey-auto \
+  PATH="${MOCK_BIN}:/usr/bin:/bin" sh "${ROOT}/manage.sh" node quick deploy@auto.example.com auto-1 >/dev/null
+[ "$(cat "${STATE_DIR}/nodes/auto-1/platform")" = linux ] || fail "automatic platform detection failed"
+[ "$(cat "${STATE_DIR}/nodes/auto-1/ssh_user")" = deploy ] || fail "quick SSH target user parsing failed"
+grep -F 'sudo -n env TS_AUTHKEY=' "${SSH_LOG}" >/dev/null || fail "automatic sudo command is missing"
+manager node delete auto-1 --yes >/dev/null
 
 echo "manager tests passed"

@@ -26,6 +26,11 @@ $env:STATE_DIR = Join-Path ([IO.Path]::GetTempPath()) "tailscale-derp-pwsh-test"
 Assert-Port "22"
 Assert-Platform "windows"
 Assert-Platform "alpine"
+Assert-Platform "auto"
+$target = ConvertFrom-SshTarget "admin@example.com:2222"
+if ($target.User -ne "admin" -or $target.Host -ne "example.com" -or $target.Port -ne 2222) {
+    throw "ConvertFrom-SshTarget parsed the target incorrectly"
+}
 
 $failed = $false
 try { Assert-Port "70000" } catch { $failed = $true }

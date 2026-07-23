@@ -44,14 +44,20 @@ irm https://raw.githubusercontent.com/shuguangnet/tailscale-derp-docker/main/ins
 - 部署或更新主 DERP 服务
 - 启动、停止、重启、查看状态和日志、卸载主服务
 - 安装 Tailscale 并让当前设备加入网络
-- 添加子节点配置
+- 快速添加并立即部署子节点
 - 查看子节点列表和脱敏配置
 - 修改子节点 SSH、hostname、auth key 和额外参数
 - 通过 SSH 把子节点加入 Tailscale
 - 删除本地子节点配置
 - 查看主 DERP 服务状态
 
-子节点通过 SSH 管理，支持 `linux`、`debian`、`ubuntu`、`alpine`、`macos` 和 `windows` 平台。Unix 非 `root` SSH 用户需要配置免密码 `sudo`；Windows SSH 会调用管理员 PowerShell。
+快速添加子节点时只需输入：
+
+1. SSH 地址，例如 `root@1.2.3.4` 或 `admin@host:2222`
+2. 节点名称
+3. 首次添加时输入一次 auth key
+
+auth key 会安全保存并供后续节点复用。脚本通过 SSH 自动识别 Linux、macOS 或 Windows，并自动判断是否需要 sudo，然后立即安装和加入网络。Unix 非 `root` 用户需要具备免密码 sudo；Windows SSH 用户需要管理员权限。
 
 Linux/macOS 节点配置按字段保存，auth key 文件权限为 `600`。Windows 配置保存在 `%ProgramData%\TailscaleDERP\nodes.json`，ACL 仅允许当前管理员和 Administrators 访问。
 
@@ -154,9 +160,17 @@ sudo TS_AUTHKEY=tskey-auth-xxxxxxxx \
   sh scripts/tailscale-onekey-join-linux.sh
 ```
 
-## 子节点命令行管理
+## 子节点高级管理
 
-菜单背后也提供可自动化的命令：
+日常使用直接选择菜单中的“快速添加并部署子节点”。需要指定平台、端口、额外参数或单独 auth key 时，可以使用完整命令：
+
+快速命令同样只需要 SSH 地址和节点名称：
+
+```sh
+sudo TS_AUTHKEY=tskey-auth-xxxxxxxx sh manage.sh node quick root@192.0.2.10 edge-1
+```
+
+完整高级配置：
 
 ```sh
 sudo sh manage.sh node add \

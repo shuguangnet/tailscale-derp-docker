@@ -16,6 +16,7 @@ STATE_DIR=${STATE_DIR:-${DEFAULT_STATE_DIR}}
 NODES_DIR=${NODES_DIR:-${STATE_DIR}/nodes}
 JOIN_SCRIPT=${JOIN_SCRIPT:-${PROJECT_DIR}/scripts/tailscale-onekey-join-linux.sh}
 JOIN_WINDOWS_SCRIPT=${JOIN_WINDOWS_SCRIPT:-${PROJECT_DIR}/scripts/tailscale-onekey-join-windows.ps1}
+SHARED_AUTH_KEY_FILE=${SHARED_AUTH_KEY_FILE:-${STATE_DIR}/auth_key}
 
 die() {
   echo "Error: $*" >&2
@@ -40,6 +41,12 @@ validate_host() {
   esac
 }
 
+validate_user() {
+  case "$1" in
+    ''|-*|*[!A-Za-z0-9._-]*) die "invalid SSH user: $1" ;;
+  esac
+}
+
 validate_port() {
   case "$1" in
     ''|*[!0-9]*) die "port must be an integer" ;;
@@ -51,15 +58,15 @@ validate_port() {
 
 validate_yes_no() {
   case "$1" in
-    yes|no) ;;
-    *) die "sudo must be yes or no" ;;
+    yes|no|auto) ;;
+    *) die "sudo must be yes, no, or auto" ;;
   esac
 }
 
 validate_platform() {
   case "$1" in
-    linux|debian|ubuntu|alpine|macos|windows) ;;
-    *) die "platform must be linux, debian, ubuntu, alpine, macos, or windows" ;;
+    auto|linux|debian|ubuntu|alpine|macos|windows) ;;
+    *) die "platform must be auto, linux, debian, ubuntu, alpine, macos, or windows" ;;
   esac
 }
 
@@ -104,6 +111,7 @@ save_node() {
   validate_yes_no "${use_sudo}"
   validate_platform "${platform}"
   [ -n "${ssh_user}" ] || die "SSH user is required"
+  validate_user "${ssh_user}"
   [ -n "${ts_hostname}" ] || die "Tailscale hostname is required"
   [ -n "${auth_key}" ] || die "Tailscale auth key is required"
 
@@ -129,8 +137,8 @@ node_add() {
   ts_hostname=
   auth_key=
   extra_args=
-  use_sudo=no
-  platform=linux
+  use_sudo=auto
+  platform=auto
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -255,8 +263,23 @@ node_deploy() {
   extra_args=$(read_field "${id}" extra_args)
   use_sudo=$(read_field "${id}" use_sudo)
   platform=$(read_field "${id}" platform)
-  platform=${platform:-linux}
+  platform=${platform:-auto}
   target="${ssh_user}@${ssh_host}"
+
+  if [ "${platform}" = auto ]; then
+    set +e
+    detected=$(ssh -p "${ssh_port}" "${target}" "uname -s" </dev/null 2>/dev/null)
+    detect_status=$?
+    set -e
+    [ "${detect_status}" -ne 255 ] || die "unable to connect to ${target}:${ssh_port}"
+    case "${detected}" in
+      Darwin*) platform=macos ;;
+      Linux*) platform=linux ;;
+      *) platform=windows ;;
+    esac
+    write_field "${id}" platform "${platform}"
+    echo "Detected remote platform: ${platform}"
+  fi
 
   echo "Deploying Tailscale ${platform} node ${id} to ${target}:${ssh_port}..."
   case "${platform}" in
@@ -274,11 +297,11 @@ node_deploy() {
       } | ssh -p "${ssh_port}" "${target}" "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command -"
       ;;
     linux|debian|ubuntu|alpine|macos)
-      if [ "${use_sudo}" = yes ]; then
-        remote_shell="sudo -n sh -c 'IFS= read -r TS_AUTHKEY; IFS= read -r TS_HOSTNAME; IFS= read -r TS_EXTRA_ARGS; export TS_AUTHKEY TS_HOSTNAME TS_EXTRA_ARGS; sh'"
-      else
-        remote_shell="sh -c 'IFS= read -r TS_AUTHKEY; IFS= read -r TS_HOSTNAME; IFS= read -r TS_EXTRA_ARGS; export TS_AUTHKEY TS_HOSTNAME TS_EXTRA_ARGS; sh'"
-      fi
+      case "${use_sudo}" in
+        yes) remote_shell="sudo -n sh -c 'IFS= read -r TS_AUTHKEY; IFS= read -r TS_HOSTNAME; IFS= read -r TS_EXTRA_ARGS; export TS_AUTHKEY TS_HOSTNAME TS_EXTRA_ARGS; sh'" ;;
+        no) remote_shell="sh -c 'IFS= read -r TS_AUTHKEY; IFS= read -r TS_HOSTNAME; IFS= read -r TS_EXTRA_ARGS; export TS_AUTHKEY TS_HOSTNAME TS_EXTRA_ARGS; sh'" ;;
+        auto) remote_shell="sh -c 'IFS= read -r TS_AUTHKEY; IFS= read -r TS_HOSTNAME; IFS= read -r TS_EXTRA_ARGS; if [ \"\$(id -u)\" -eq 0 ]; then export TS_AUTHKEY TS_HOSTNAME TS_EXTRA_ARGS; sh; else sudo -n env TS_AUTHKEY=\"\$TS_AUTHKEY\" TS_HOSTNAME=\"\$TS_HOSTNAME\" TS_EXTRA_ARGS=\"\$TS_EXTRA_ARGS\" sh; fi'" ;;
+      esac
       {
         printf '%s\n' "${auth_key}" "${ts_hostname}" "${extra_args}"
         sed '1d' "${JOIN_SCRIPT}"
@@ -313,24 +336,63 @@ prompt_secret() {
   printf '%s\n' "${answer}"
 }
 
-interactive_add() {
-  id=$(prompt "Node ID")
-  platform=$(prompt "Platform (linux/debian/ubuntu/alpine/macos/windows)" linux)
-  ssh_host=$(prompt "SSH host or IP")
-  ssh_user=$(prompt "SSH user" root)
-  ssh_port=$(prompt "SSH port" 22)
-  ts_hostname=$(prompt "Tailscale hostname" "${id}")
-  auth_key=$(prompt_secret "Tailscale auth key")
-  extra_args=$(prompt "Extra tailscale up arguments" "")
-  if [ "${platform}" = windows ] || [ "${ssh_user}" = root ]; then default_sudo=no; else default_sudo=yes; fi
-  use_sudo=$(prompt "Use passwordless sudo (yes/no)" "${default_sudo}")
-  node_add --id "${id}" --ssh-host "${ssh_host}" --ssh-user "${ssh_user}" \
-    --ssh-port "${ssh_port}" --hostname "${ts_hostname}" --auth-key "${auth_key}" \
-    --extra-args "${extra_args}" --sudo "${use_sudo}" --platform "${platform}"
-  deploy_now=$(prompt "立即通过 SSH 部署此节点 (yes/no)" yes)
-  if [ "${deploy_now}" = yes ]; then
-    node_deploy "${id}"
+parse_ssh_target() {
+  target_input=$1
+  case "${target_input}" in
+    *@*) QUICK_SSH_USER=${target_input%%@*}; endpoint=${target_input#*@} ;;
+    *) QUICK_SSH_USER=root; endpoint=${target_input} ;;
+  esac
+  case "${endpoint}" in
+    *:*)
+      QUICK_SSH_HOST=${endpoint%:*}
+      QUICK_SSH_PORT=${endpoint##*:}
+      ;;
+    *)
+      QUICK_SSH_HOST=${endpoint}
+      QUICK_SSH_PORT=22
+      ;;
+  esac
+  validate_host "${QUICK_SSH_HOST}"
+  validate_port "${QUICK_SSH_PORT}"
+  [ -n "${QUICK_SSH_USER}" ] || die "SSH user is required"
+}
+
+shared_auth_key() {
+  ensure_state
+  if [ -n "${TS_AUTHKEY:-}" ]; then
+    auth_key=${TS_AUTHKEY}
+  elif [ -s "${SHARED_AUTH_KEY_FILE}" ]; then
+    auth_key=$(sed -n '1p' "${SHARED_AUTH_KEY_FILE}")
+    echo "Using saved Tailscale auth key." >/dev/tty
+  else
+    auth_key=$(prompt_secret "Tailscale auth key (saved for later nodes)")
+    [ -n "${auth_key}" ] || die "Tailscale auth key is required"
+    printf '%s\n' "${auth_key}" >"${SHARED_AUTH_KEY_FILE}"
+    chmod 600 "${SHARED_AUTH_KEY_FILE}"
   fi
+  printf '%s\n' "${auth_key}"
+}
+
+node_quick_add() {
+  target_input=${1:-}
+  id=${2:-}
+  [ -n "${target_input}" ] || die "SSH target is required"
+  parse_ssh_target "${target_input}"
+  default_id=$(printf '%s' "${QUICK_SSH_HOST}" | sed 's/[^A-Za-z0-9_-]/-/g; s/^-*//; s/-*$//')
+  id=${id:-${default_id:-node}}
+  auth_key=$(shared_auth_key)
+  node_add --id "${id}" --ssh-host "${QUICK_SSH_HOST}" --ssh-user "${QUICK_SSH_USER}" \
+    --ssh-port "${QUICK_SSH_PORT}" --hostname "${id}" --auth-key "${auth_key}" \
+    --extra-args "" --sudo auto --platform auto
+  node_deploy "${id}"
+}
+
+interactive_add() {
+  target_input=$(prompt "SSH 地址 (例如 root@1.2.3.4 或 user@host:2222)")
+  parse_ssh_target "${target_input}"
+  default_id=$(printf '%s' "${QUICK_SSH_HOST}" | sed 's/[^A-Za-z0-9_-]/-/g; s/^-*//; s/-*$//')
+  id=$(prompt "节点名称" "${default_id:-node}")
+  node_quick_add "${target_input}" "${id}"
 }
 
 interactive_edit() {
@@ -339,7 +401,7 @@ interactive_edit() {
   node_exists "${id}" || die "node not found: ${id}"
   ssh_host=$(prompt "SSH host or IP" "$(read_field "${id}" ssh_host)")
   current_platform=$(read_field "${id}" platform)
-  platform=$(prompt "Platform" "${current_platform:-linux}")
+  platform=$(prompt "Platform" "${current_platform:-auto}")
   ssh_user=$(prompt "SSH user" "$(read_field "${id}" ssh_user)")
   ssh_port=$(prompt "SSH port" "$(read_field "${id}" ssh_port)")
   ts_hostname=$(prompt "Tailscale hostname" "$(read_field "${id}" ts_hostname)")
@@ -347,7 +409,7 @@ interactive_edit() {
   if [ "${extra_args}" = - ]; then
     extra_args=
   fi
-  use_sudo=$(prompt "Use passwordless sudo (yes/no)" "$(read_field "${id}" use_sudo)")
+  use_sudo=$(prompt "Use sudo (auto/yes/no)" "$(read_field "${id}" use_sudo)")
   replace_key=$(prompt "Replace auth key (yes/no)" no)
   if [ "${replace_key}" = yes ]; then auth_key=$(prompt_secret "New auth key"); else auth_key=$(read_field "${id}" auth_key); fi
   node_edit "${id}" --ssh-host "${ssh_host}" --ssh-user "${ssh_user}" \
@@ -452,7 +514,7 @@ Tailscale DERP 管理菜单
 2. 管理主 DERP 服务
 3. 安装 Tailscale 并让当前设备加入网络
 ------------------------------------------------
-4. 添加子节点配置
+4. 快速添加并部署子节点
 5. 查看子节点列表
 6. 查看子节点配置
 7. 修改子节点配置
@@ -485,6 +547,7 @@ Usage:
   manage.sh local-join
   manage.sh main start|stop|restart|status|logs|uninstall
   manage.sh node list
+  manage.sh node quick USER@HOST[:PORT] [NODE_NAME]
   manage.sh node show ID
   manage.sh node add --id ID --ssh-host HOST --hostname NAME --auth-key KEY [options]
   manage.sh node edit ID [options]
@@ -509,6 +572,7 @@ case "${command}" in
     shift 2
     case "${action}" in
       list) node_list "$@" ;;
+      quick) node_quick_add "$@" ;;
       show) node_show "$@" ;;
       add) node_add "$@" ;;
       edit) node_edit "$@" ;;
