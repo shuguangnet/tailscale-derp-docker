@@ -33,7 +33,9 @@ validate_port() {
   case "$1" in
     ''|*[!0-9]*) die "port must be an integer" ;;
   esac
-  [ "$1" -ge 1 ] && [ "$1" -le 65535 ] || die "port must be between 1 and 65535"
+  if [ "$1" -lt 1 ] || [ "$1" -gt 65535 ]; then
+    die "port must be between 1 and 65535"
+  fi
 }
 
 validate_yes_no() {
@@ -383,8 +385,12 @@ case "${command}" in
   deploy-main) interactive_deploy_main ;;
   status) show_main_status ;;
   node)
-    action=${2:-}
-    [ "$#" -ge 2 ] && shift 2 || true
+    if [ "$#" -lt 2 ]; then
+      usage
+      exit 1
+    fi
+    action=$2
+    shift 2
     case "${action}" in
       list) node_list "$@" ;;
       show) node_show "$@" ;;
