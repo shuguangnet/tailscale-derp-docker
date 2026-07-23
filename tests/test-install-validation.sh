@@ -5,12 +5,6 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "${TMP}"' EXIT HUP INT TERM
 
-if sh "${ROOT}/install.sh" >"${TMP}/out" 2>"${TMP}/err"; then
-  echo "FAIL: missing hostname should fail" >&2
-  exit 1
-fi
-grep -F 'DERP_HOSTNAME is required.' "${TMP}/err" >/dev/null
-
 if DERP_HOSTNAME='bad host' sh "${ROOT}/install.sh" >"${TMP}/out" 2>"${TMP}/err"; then
   echo "FAIL: invalid hostname should fail" >&2
   exit 1

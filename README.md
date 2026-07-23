@@ -10,7 +10,33 @@
 
 DNS 中必须先把 DERP 域名的 A/AAAA 记录指向服务器。防火墙需要开放 `8443/tcp` 和 `3478/udp`。
 
-## 一键部署
+## 交互菜单一键管理
+
+直接运行安装脚本且不传参数，会下载程序并进入管理菜单：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/shuguangnet/tailscale-derp-docker/main/install.sh | sudo sh
+```
+
+菜单支持：
+
+- 部署或更新主 DERP 服务
+- 添加子节点配置
+- 查看子节点列表和脱敏配置
+- 修改子节点 SSH、hostname、auth key 和额外参数
+- 通过 SSH 把子节点加入 Tailscale
+- 删除本地子节点配置
+- 查看主 DERP 服务状态
+
+子节点是通过 SSH 管理的远程 Linux 主机。非 `root` SSH 用户需要配置免密码 `sudo`。节点配置保存在 `/etc/tailscale-derp-docker/nodes`，目录权限为 `700`，auth key 文件权限为 `600`。
+
+已经克隆仓库时也可以运行：
+
+```sh
+sudo sh manage.sh
+```
+
+## 非交互部署主服务
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/shuguangnet/tailscale-derp-docker/main/install.sh \
@@ -82,6 +108,30 @@ sudo TS_AUTHKEY=tskey-auth-xxxxxxxx \
   TS_EXTRA_ARGS='--advertise-exit-node --ssh' \
   sh scripts/tailscale-onekey-join-linux.sh
 ```
+
+## 子节点命令行管理
+
+菜单背后也提供可自动化的命令：
+
+```sh
+sudo sh manage.sh node add \
+  --id edge-1 \
+  --ssh-host 192.0.2.10 \
+  --ssh-user root \
+  --ssh-port 22 \
+  --hostname edge-one \
+  --auth-key tskey-auth-xxxxxxxx \
+  --extra-args '--ssh' \
+  --sudo no
+
+sudo sh manage.sh node list
+sudo sh manage.sh node show edge-1
+sudo sh manage.sh node edit edge-1 --ssh-port 2222 --hostname edge-new
+sudo sh manage.sh node deploy edge-1
+sudo sh manage.sh node delete edge-1 --yes
+```
+
+删除操作只删除本机保存的配置，不会从 Tailscale 管理后台删除对应设备。
 
 ## 运维
 
