@@ -1,0 +1,29 @@
+services:
+  derper:
+    build:
+      context: .
+      args:
+        TAILSCALE_VERSION: ${TAILSCALE_VERSION:-v1.98.9}
+    image: local/tailscale-derper:${TAILSCALE_VERSION:-v1.98.9}
+    container_name: tailscale-derper
+    command:
+      - -a=:8080
+      - -c=/var/lib/derper/derper.key
+      - -http-port=-1
+      - -stun-port=3478
+      - -hostname=${DERP_HOSTNAME:?set DERP_HOSTNAME in .env}
+    ports:
+      - ${DERP_BIND_ADDRESS:-127.0.0.1}:${DERP_BACKEND_PORT:-8080}:8080/tcp
+      - ${STUN_PORT:-3478}:3478/udp
+    volumes:
+      - derper-data:/var/lib/derper
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  derper-data:
