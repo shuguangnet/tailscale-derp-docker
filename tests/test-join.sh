@@ -35,6 +35,14 @@ cat >"${MOCK_BIN}/hostname" <<'EOF'
 #!/bin/sh
 printf 'mock-host\n'
 EOF
+cat >"${MOCK_BIN}/id" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = -u ]; then
+  printf '0\n'
+else
+  /usr/bin/id "$@"
+fi
+EOF
 chmod +x "${MOCK_BIN}"/*
 
 if PATH="${MOCK_BIN}:/usr/bin:/bin" sh "${ROOT}/scripts/tailscale-onekey-join-linux.sh" \
