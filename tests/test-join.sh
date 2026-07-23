@@ -53,4 +53,23 @@ assert_contains 'tailscale <up> <--auth-key=tskey-test> <--hostname=node-one> <-
 assert_contains 'tailscale <status>'
 assert_contains 'tailscale <netcheck>'
 
+cat >"${MOCK_BIN}/uname" <<'EOF'
+#!/bin/sh
+printf 'Darwin\n'
+EOF
+cat >"${MOCK_BIN}/open" <<'EOF'
+#!/bin/sh
+printf 'open' >>"${TEST_LOG}"
+printf ' <%s>' "$@" >>"${TEST_LOG}"
+printf '\n' >>"${TEST_LOG}"
+EOF
+chmod +x "${MOCK_BIN}/uname" "${MOCK_BIN}/open"
+
+: >"${LOG}"
+TEST_LOG="${LOG}" PATH="${MOCK_BIN}:/usr/bin:/bin" \
+  TS_AUTHKEY=tskey-mac TS_HOSTNAME=mac-one \
+  sh "${ROOT}/scripts/tailscale-onekey-join-linux.sh" >/dev/null
+assert_contains 'open <-a> <Tailscale>'
+assert_contains 'tailscale <up> <--auth-key=tskey-mac> <--hostname=mac-one> <--accept-dns=false>'
+
 echo "join script tests passed"

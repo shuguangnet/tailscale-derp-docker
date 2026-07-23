@@ -27,15 +27,18 @@ manager node add \
   --hostname edge-one \
   --auth-key tskey-auth-secret \
   --extra-args '--ssh --advertise-exit-node' \
-  --sudo yes >/dev/null
+  --sudo yes \
+  --platform alpine >/dev/null
 
 [ "$(cat "${STATE_DIR}/nodes/edge-1/ssh_port")" = 2222 ] || fail "SSH port was not saved"
 [ "$(cat "${STATE_DIR}/nodes/edge-1/ts_hostname")" = edge-one ] || fail "hostname was not saved"
+[ "$(cat "${STATE_DIR}/nodes/edge-1/platform")" = alpine ] || fail "platform was not saved"
 [ "$(stat -c '%a' "${STATE_DIR}/nodes/edge-1/auth_key")" = 600 ] || fail "auth key mode is not 600"
 
 manager node list >"${TMP}/list"
 grep -F 'edge-1' "${TMP}/list" >/dev/null || fail "node missing from list"
 grep -F '192.0.2.10:2222' "${TMP}/list" >/dev/null || fail "SSH endpoint missing from list"
+grep -F 'alpine' "${TMP}/list" >/dev/null || fail "platform missing from list"
 
 manager node show edge-1 >"${TMP}/show"
 grep -F 'tskey-au...' "${TMP}/show" >/dev/null || fail "auth key was not masked"
@@ -67,5 +70,17 @@ grep -F 'set -eu' "${SSH_INPUT}" >/dev/null || fail "join script was not streame
 
 manager node delete edge-1 --yes >/dev/null
 [ ! -d "${STATE_DIR}/nodes/edge-1" ] || fail "node directory was not deleted"
+
+manager node add \
+  --id win-1 --platform windows --ssh-host win.example.com --ssh-user Administrator \
+  --ssh-port 22 --hostname win-one --auth-key tskey-win --sudo no >/dev/null
+: >"${SSH_LOG}"
+: >"${SSH_INPUT}"
+SSH_LOG="${SSH_LOG}" SSH_INPUT="${SSH_INPUT}" STATE_DIR="${STATE_DIR}" \
+  PATH="${MOCK_BIN}:/usr/bin:/bin" sh "${ROOT}/manage.sh" node deploy win-1 >/dev/null
+grep -F 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command -' "${SSH_LOG}" >/dev/null || fail "Windows SSH command is incorrect"
+grep -F "\$env:TS_AUTHKEY=" "${SSH_INPUT}" >/dev/null || fail "Windows auth preamble missing"
+grep -F "\$ErrorActionPreference = \"Stop\"" "${SSH_INPUT}" >/dev/null || fail "Windows join script was not streamed"
+manager node delete win-1 --yes >/dev/null
 
 echo "manager tests passed"

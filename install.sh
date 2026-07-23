@@ -2,7 +2,22 @@
 set -eu
 
 REPO_SLUG=${REPO_SLUG:-shuguangnet/tailscale-derp-docker}
-INSTALL_DIR=${INSTALL_DIR:-/opt/tailscale-derp-docker}
+OS_NAME=$(uname -s)
+case "${OS_NAME}" in
+  Darwin) DEFAULT_INSTALL_DIR="${HOME}/Library/Application Support/tailscale-derp-docker" ;;
+  Linux)
+    DEFAULT_INSTALL_DIR=/opt/tailscale-derp-docker
+    if [ -f /etc/os-release ]; then
+      # shellcheck disable=SC1091
+      . /etc/os-release
+      LINUX_ID=${ID:-linux}
+    else
+      LINUX_ID=linux
+    fi
+    ;;
+  *) echo "Unsupported operating system: ${OS_NAME}" >&2; exit 1 ;;
+esac
+INSTALL_DIR=${INSTALL_DIR:-${DEFAULT_INSTALL_DIR}}
 DERP_HOSTNAME=${DERP_HOSTNAME:-${1:-}}
 DERP_PORT=${DERP_PORT:-8443}
 DERP_BACKEND_PORT=${DERP_BACKEND_PORT:-8080}
@@ -44,7 +59,7 @@ if [ -n "${DERP_HOSTNAME}" ]; then
   fi
 fi
 
-if [ "$(id -u)" -ne 0 ]; then
+if [ "${OS_NAME}" = Linux ] && [ "$(id -u)" -ne 0 ]; then
   echo "Run this installer as root." >&2
   exit 1
 fi
@@ -53,11 +68,39 @@ install_docker() {
   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
     return
   fi
-  if ! command -v curl >/dev/null 2>&1; then
-    echo "curl is required to install Docker." >&2
-    exit 1
-  fi
-  curl -fsSL https://get.docker.com | sh
+  case "${OS_NAME}" in
+    Linux)
+      if [ "${LINUX_ID:-linux}" = alpine ]; then
+        apk add --no-cache docker docker-cli-compose ca-certificates curl
+        rc-update add docker default >/dev/null 2>&1 || true
+        rc-service docker start
+      else
+        if ! command -v curl >/dev/null 2>&1; then
+          echo "curl is required to install Docker." >&2
+          exit 1
+        fi
+        curl -fsSL https://get.docker.com | sh
+      fi
+      ;;
+    Darwin)
+      command -v brew >/dev/null 2>&1 || {
+        echo "Homebrew is required to install Docker Desktop automatically." >&2
+        echo "Install it from https://brew.sh and run this script again." >&2
+        exit 1
+      }
+      brew install --cask docker
+      open -a Docker
+      attempts=0
+      until docker compose version >/dev/null 2>&1; do
+        attempts=$((attempts + 1))
+        [ "${attempts}" -le 60 ] || {
+          echo "Docker Desktop did not become ready within 2 minutes." >&2
+          exit 1
+        }
+        sleep 2
+      done
+      ;;
+  esac
 }
 
 download_repo() {

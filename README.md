@@ -1,6 +1,15 @@
-# Tailscale DERP Docker 一键部署
+# Tailscale DERP 跨平台一键部署
 
-用 Docker Compose 部署自建 Tailscale DERP，并提供 Linux 节点一键加入脚本。默认适配宿主机已有 edge-caddy、`443` 已被占用、DERP 对外使用 `8443` 的场景。
+参考 oneKeyEasyTier 的交互方式，用统一菜单部署自建 Tailscale DERP、管理服务和批量添加子节点。支持 Debian、Ubuntu、Alpine 等 Linux，支持 macOS 和 Windows。
+
+| 系统 | 管理脚本 | Tailscale 安装 | DERP 运行方式 |
+| --- | --- | --- | --- |
+| Debian / Ubuntu | POSIX shell | 官方软件源 | Docker Engine |
+| Alpine Linux | POSIX shell + OpenRC | 官方软件源 | Alpine Docker + OpenRC |
+| 其他受 Tailscale 支持的 Linux | POSIX shell | 官方安装器 | Docker Engine |
+| macOS | POSIX shell | 官方 PKG | Docker Desktop |
+| Windows 10/11 | PowerShell | winget 或官方 MSI | Docker Desktop |
+| Windows Server | PowerShell | winget 或官方 MSI | 建议仅作为节点，DERP 使用 Linux 主机/虚拟机 |
 
 ## 架构
 
@@ -10,17 +19,31 @@
 
 DNS 中必须先把 DERP 域名的 A/AAAA 记录指向服务器。防火墙需要开放 `8443/tcp` 和 `3478/udp`。
 
-## 交互菜单一键管理
+## 一键启动交互菜单
 
-直接运行安装脚本且不传参数，会下载程序并进入管理菜单：
+Debian、Ubuntu、Alpine 等 Linux：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/shuguangnet/tailscale-derp-docker/main/install.sh | sudo sh
 ```
 
+macOS 不要给整个菜单加 `sudo`，需要安装系统组件时脚本会单独请求权限：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/shuguangnet/tailscale-derp-docker/main/install.sh | sh
+```
+
+Windows 请在“管理员 PowerShell”中运行：
+
+```powershell
+irm https://raw.githubusercontent.com/shuguangnet/tailscale-derp-docker/main/install.ps1 | iex
+```
+
 菜单支持：
 
 - 部署或更新主 DERP 服务
+- 启动、停止、重启、查看状态和日志、卸载主服务
+- 安装 Tailscale 并让当前设备加入网络
 - 添加子节点配置
 - 查看子节点列表和脱敏配置
 - 修改子节点 SSH、hostname、auth key 和额外参数
@@ -28,13 +51,18 @@ curl -fsSL https://raw.githubusercontent.com/shuguangnet/tailscale-derp-docker/m
 - 删除本地子节点配置
 - 查看主 DERP 服务状态
 
-子节点是通过 SSH 管理的远程 Linux 主机。非 `root` SSH 用户需要配置免密码 `sudo`。节点配置保存在 `/etc/tailscale-derp-docker/nodes`，目录权限为 `700`，auth key 文件权限为 `600`。
+子节点通过 SSH 管理，支持 `linux`、`debian`、`ubuntu`、`alpine`、`macos` 和 `windows` 平台。Unix 非 `root` SSH 用户需要配置免密码 `sudo`；Windows SSH 会调用管理员 PowerShell。
+
+Linux/macOS 节点配置按字段保存，auth key 文件权限为 `600`。Windows 配置保存在 `%ProgramData%\TailscaleDERP\nodes.json`，ACL 仅允许当前管理员和 Administrators 访问。
 
 已经克隆仓库时也可以运行：
 
 ```sh
-sudo sh manage.sh
+sudo sh manage.sh # Linux
+sh manage.sh      # macOS
 ```
+
+Windows 已下载的管理器位于 `%ProgramData%\TailscaleDERP\app\manage.ps1`。
 
 ## 非交互部署主服务
 
@@ -91,13 +119,30 @@ https://bs.de.933999.xyz:8443 {
 
 保存 Policy 后，在客户端运行 `tailscale netcheck`。看到 `901`、`bs.de.933999.xyz:8443` 或该节点为首选 DERP，说明配置已生效。
 
-## Linux 节点一键加入
+## 当前设备直接加入
 
-在 Tailscale 后台的 **Settings / Keys / Auth keys** 创建 `Reusable`、`Pre-approved`、非 `Ephemeral` 的 auth key，然后执行：
+在 Tailscale 后台的 **Settings / Keys / Auth keys** 创建 `Reusable`、`Pre-approved`、非 `Ephemeral` 的 auth key。
+
+Linux：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/shuguangnet/tailscale-derp-docker/main/scripts/tailscale-onekey-join-linux.sh \
   | sudo TS_AUTHKEY=tskey-auth-xxxxxxxx TS_HOSTNAME=my-node sh
+```
+
+macOS：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/shuguangnet/tailscale-derp-docker/main/scripts/tailscale-onekey-join-linux.sh \
+  | TS_AUTHKEY=tskey-auth-xxxxxxxx TS_HOSTNAME=my-mac sh
+```
+
+Windows 管理员 PowerShell：
+
+```powershell
+$env:TS_AUTHKEY = "tskey-auth-xxxxxxxx"
+$env:TS_HOSTNAME = "my-windows"
+irm https://raw.githubusercontent.com/shuguangnet/tailscale-derp-docker/main/scripts/tailscale-onekey-join-windows.ps1 | iex
 ```
 
 额外的 `tailscale up` 参数可通过 `TS_EXTRA_ARGS` 传入：
@@ -116,6 +161,7 @@ sudo TS_AUTHKEY=tskey-auth-xxxxxxxx \
 ```sh
 sudo sh manage.sh node add \
   --id edge-1 \
+  --platform alpine \
   --ssh-host 192.0.2.10 \
   --ssh-user root \
   --ssh-port 22 \
@@ -132,6 +178,14 @@ sudo sh manage.sh node delete edge-1 --yes
 ```
 
 删除操作只删除本机保存的配置，不会从 Tailscale 管理后台删除对应设备。
+
+## 平台说明
+
+- Linux 是生产 DERP 的推荐平台。
+- macOS 和 Windows 可以通过 Docker Desktop 运行 DERP，适合开发、测试或具备稳定公网环境的主机。
+- macOS 首次安装 Tailscale 后，系统可能要求批准 VPN/网络扩展。
+- Windows Server 若没有 `winget`，脚本会下载 Tailscale 官方 MSI。Windows Server 建议作为 Tailscale 节点；生产 DERP 使用 Linux 主机或 Linux 虚拟机。
+- macOS/Windows 上的 edge-caddy 如果运行在容器中，不能直接用容器内的 `127.0.0.1` 访问 DERP 后端，需要使用 `host.docker.internal:8080` 或共享 Docker 网络。
 
 ## 运维
 

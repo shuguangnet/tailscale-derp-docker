@@ -16,6 +16,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Run tests
         run: sh tests/run.sh
+      - name: Validate PowerShell scripts
+        shell: pwsh
+        run: ./tests/Test-PowerShellSyntax.ps1
       - name: Validate Compose config
         env:
           DERP_HOSTNAME: derp.example.com
