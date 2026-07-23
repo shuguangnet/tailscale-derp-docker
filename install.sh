@@ -24,6 +24,26 @@ validate_port() {
   fi
 }
 
+if [ -n "${DERP_HOSTNAME}" ]; then
+  case "${DERP_HOSTNAME}" in
+    *[!A-Za-z0-9.-]*|.*|*.)
+      echo "DERP_HOSTNAME must be a DNS hostname." >&2
+      exit 1
+      ;;
+  esac
+
+  validate_port DERP_PORT "${DERP_PORT}"
+  validate_port DERP_BACKEND_PORT "${DERP_BACKEND_PORT}"
+  validate_port STUN_PORT "${STUN_PORT}"
+  case "${DERP_REGION_ID}" in
+    ''|*[!0-9]*) echo "DERP_REGION_ID must be a positive integer." >&2; exit 1 ;;
+  esac
+  if [ "${DERP_REGION_ID}" -lt 1 ]; then
+    echo "DERP_REGION_ID must be a positive integer." >&2
+    exit 1
+  fi
+fi
+
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this installer as root." >&2
   exit 1
@@ -62,24 +82,6 @@ download_repo
 if [ -z "${DERP_HOSTNAME}" ]; then
   sh "${INSTALL_DIR}/manage.sh" menu
   exit 0
-fi
-
-case "${DERP_HOSTNAME}" in
-  *[!A-Za-z0-9.-]*|.*|*.)
-    echo "DERP_HOSTNAME must be a DNS hostname." >&2
-    exit 1
-    ;;
-esac
-
-validate_port DERP_PORT "${DERP_PORT}"
-validate_port DERP_BACKEND_PORT "${DERP_BACKEND_PORT}"
-validate_port STUN_PORT "${STUN_PORT}"
-case "${DERP_REGION_ID}" in
-  ''|*[!0-9]*) echo "DERP_REGION_ID must be a positive integer." >&2; exit 1 ;;
-esac
-if [ "${DERP_REGION_ID}" -lt 1 ]; then
-  echo "DERP_REGION_ID must be a positive integer." >&2
-  exit 1
 fi
 
 install_docker
